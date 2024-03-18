@@ -1,0 +1,300 @@
+Program.Sub.Preflight.Start
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Customer: Cyclonic Valve
+'Developer: FEQ (Sisco)
+'Date: 6/24/2021
+'This is a program that will grab the labor to payroll information and put together an excel spreadsheet for iSolved.
+'This will run off the post process hook of the Labor to Payroll Export. 
+'we are allowing the core program to process the export information and just grabbing the processed data from the V_PYRL_LABOR_XFER table
+'The columns for the export are:
+'****************************************************************************************************************************
+'Legal --------------------------------- [Hard coded to be 20025]
+'PayGroup ------------------------------ [Hard coded to be Bi-Weekly]
+'Department ----------------------------
+'Key ----------------------------------- [Employee Number]
+'Name ---------------------------------- [Employee Name]
+'E_Regular_Hours ----------------------- [Regular Hours]
+'E_Birthday_Hours ---------------------- [Birthday Hours]
+'E_Holiday_Hours ----------------------- [Holiday Hours]
+'E_Paid Time Off_Hours ----------------- [PTO Hours]
+'E_Personal_Hours ---------------------- [Personal Hours]
+'E_Sick_Hours -------------------------- [Sick Hours]
+'E_Special_Hours ----------------------- [Special Hours]
+'E_Volunteer_Hours --------------------- [Volunteer Hours]
+'****************************************************************************************************************************
+'Every employee will have a single row with the appropriate time in the selected column
+
+F.Intrinsic.Control.Try
+
+'We will be using hook 15290
+F.Intrinsic.Control.SelectCase(V.Caller.Hook)
+F.Intrinsic.Control.Case(15290)
+	
+	F.Intrinsic.Control.CallSub(Gather)
+	F.Intrinsic.Control.CallSub(Process)
+	F.Intrinsic.Control.CallSub(Print)
+	
+F.Intrinsic.Control.CaseElse
+	
+	F.Intrinsic.Control.CallSub(Gather)
+	F.Intrinsic.Control.CallSub(Process)
+	F.Intrinsic.Control.CallSub(Print)
+	
+F.Intrinsic.Control.EndSelect
+
+
+F.Intrinsic.Control.Catch
+F.Intrinsic.Control.CallSub(Error, "Subroutine", V.Ambient.CurrentSubroutine, "ErrorDesc", V.Ambient.ErrorDescription, "ErrorNo", V.Ambient.ErrorNumber)
+F.Intrinsic.Control.EndTry
+Program.Sub.Main.End
+
+Program.Sub.Error.Start
+F.Intrinsic.Control.Try
+V.Local.sError.Declare(String, "")
+
+'Note that this subroutine does not terminate the project. 
+'If an error happens that would be require termination of the program, this needs to be taken care of in the catch section of the subroutine this was called from
+F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}", V.Caller.ScriptFile, V.Ambient.Newline, V.Args.Subroutine, V.Args.ErrorNo, V.Args.ErrorDesc, V.Ambient.GABVersion, V.Local.sError)
+
+F.Intrinsic.UI.Msgbox(V.Local.sError, "CRITICAL ERROR")
+
+F.Intrinsic.Control.End
+
+F.Intrinsic.Control.Catch
+F.Intrinsic.Control.Exitsub
+F.Intrinsic.Control.EndTry
+Program.Sub.Error.End
+
+Program.Sub.Unload.Start
+F.Intrinsic.Control.Try
+
+F.Intrinsic.Control.End
+
+F.Intrinsic.Control.Catch
+F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.Unload.End
+
+Program.Sub.Gather.Start
+F.Intrinsic.Control.Try
+V.Local.sSql.Declare(String, "")
+V.Local.sCYMD.Declare(String, "")
+V.Local.sTIME.Declare(String, "")
+V.Local.sTemp.Declare(String, "")
+
+'We will be grabbing the data from the database for the transactions that were just processed - the key used are the date and time
+V.Local.sCYMD.Set(V.Passed.BEGDATE.Trim)
+F.Intrinsic.String.Replace(V.Passed.888888.Trim, V.Local.sCYMD, "", V.Local.sTemp)
+F.Intrinsic.String.Left(V.Local.sTemp, 6, V.Local.sTIME)
+
+'TESTING *************************************************************************************
+'V.Local.sCYMD.Set("20210621")
+'V.Local.sTIME.Set("092601")
+
+'TESTING *************************************************************************************
+
+F.Intrinsic.String.Build("Select EMPLOYEE, SEQ, NAME, DEPT, HOURS, TYPE, EC, DESCR, F_GROUP from PYRL_LABOR_XFER where RUN_CYMD = '{0}' and RUN_TIME = '{1}'", V.Local.sCYMD, V.Local.sTIME, V.Local.sSql)
+
+F.ODBC.Connection!conx.OpenCompanyConnection
+
+F.Data.DataTable.CreateFromSQL("dtXfer", "conx", V.Local.sSql, True)
+
+F.Data.DataTable.CreateFromSQL("dtEmps", "conx", "Select EMPLOYEE, NAME, DEPT_EMPLOYEE from V_EMPLOYEE_MSTR where DATE_TERMINATION = '1900-01-01' order by EMPLOYEE desc", True)
+
+F.ODBC.Connection!conx.Close
+
+F.Data.DataTable.AddColumn("dtEmps", "Reg_Hours", "String")
+F.Data.DataTable.AddColumn("dtEmps", "Bir_Hours", "String")
+F.Data.DataTable.AddColumn("dtEmps", "Hol_Hours", "String")
+F.Data.DataTable.AddColumn("dtEmps", "PTO_Hours", "String")
+F.Data.DataTable.AddColumn("dtEmps", "Per_Hours", "String")
+F.Data.DataTable.AddColumn("dtEmps", "Sik_Hours", "String")
+F.Data.DataTable.AddColumn("dtEmps", "Spe_Hours", "String")
+F.Data.DataTable.AddColumn("dtEmps", "Vol_Hours", "String")
+F.Data.DataTable.AddColumn("dtEmps", "LaborValue1", "String")
+F.Data.DataTable.AddColumn("dtEmps", "PROCESS_FLAG", "String")
+
+F.Intrinsic.Control.Catch
+F.Intrinsic.Control.CallSub(Error, "Subroutine", V.Ambient.CurrentSubroutine, "ErrorDesc", V.Ambient.ErrorDescription, "ErrorNo", V.Ambient.ErrorNumber)
+F.Intrinsic.Control.EndTry
+Program.Sub.Gather.End
+
+Program.Sub.Process.Start
+F.Intrinsic.Control.Try
+V.Local.sFitler.Declare(String, "")
+V.Local.sLineType.Declare(String, "")
+V.Local.sLabVal.Declare(String, "")
+V.Local.sVolTime.Declare(String, "")
+V.Local.fRegHrs.Declare(Float, 0.00)
+V.Local.fBirHrs.Declare(Float, 0.00)
+V.Local.fHolHrs.Declare(Float, 0.00)
+V.Local.fPTOHrs.Declare(Float, 0.00)
+V.Local.fPerHrs.Declare(Float, 0.00)
+V.Local.fSikHrs.Declare(Float, 0.00)
+V.Local.fSpeHrs.Declare(Float, 0.00)
+V.Local.fVolHrs.Declare(Float, 0.00)
+V.Local.fOTHrs.Declare(Float, 0.00)
+V.Local.iLoop.Declare(Long, 0)
+V.Local.iEmp.Declare(Long, 0)
+
+'If we get here, we should have two different tables loaded into memory, the actual data to be processed (dtXfer), and the employee list (dtEmps).
+F.Intrinsic.Control.For(V.Local.iLoop, 0, V.DataTable.dtEmps.RowCount--, 1)
+	F.Intrinsic.String.Build("[EMPLOYEE] = '{0}'", V.DataTable.dtEmps(V.Local.iLoop).EMPLOYEE!FieldValTrim, V.Local.sFitler)
+	
+	F.Data.DataView.Create("dtXfer", "dvEmp", 22, V.Local.sFitler, "SEQ ASC")
+	
+	F.Intrinsic.Control.If(V.DataView.dtXfer!dvEmp.RowCount, >, 0)
+		
+		V.Local.sLabVal.Set(V.DataView.dtXfer!dvEMP(0).DEPT!FieldValTrim)
+		
+		F.Intrinsic.Control.For(V.Local.iEmp, 0, V.DataView.dtXfer!dvEMP.RowCount--, 1)
+			
+			'We check what kind of value is in the line and add it to the value for the employee
+			V.Local.sLineType.Set(V.DataView.dtXfer!dvEMP(V.Local.iEmp).EC!FieldValTrim)
+			
+			F.Intrinsic.Control.If(V.Local.sLineType.Trim, =, "")
+				V.Local.sLineType.Set(V.DataView.dtXfer!dvEmp(V.Local.iEmp).DESCR!FieldValTrim)
+			F.Intrinsic.Control.EndIf
+			
+			F.Intrinsic.Control.SelectCase(V.Local.sLineType.UCase)
+				F.Intrinsic.Control.Case("01")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fRegHrs, V.Local.fRegHrs)
+					
+				F.Intrinsic.Control.Case("1-REGULAR")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fRegHrs, V.Local.fRegHrs)
+				
+				F.Intrinsic.Control.Case("02")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fPTOHrs, V.Local.fPTOHrs)
+				
+				F.Intrinsic.Control.Case("2-OVERTIME")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fOTHrs, V.Local.fOTHrs)
+				
+				F.Intrinsic.Control.Case("03")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fSikHrs, V.Local.fSikHrs)
+				
+				F.Intrinsic.Control.Case("04")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fPerHrs, V.Local.fPerHrs)
+				
+				F.Intrinsic.Control.Case("05")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fHolHrs, V.Local.fHolHrs)
+				
+				F.Intrinsic.Control.Case("06")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fVolHrs, V.Local.fVolHrs)
+				
+				F.Intrinsic.Control.Case("07")
+					'Comp time. Dunno where to put that?
+'					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fRegHrs, V.Local.fRegHrs)
+				
+				F.Intrinsic.Control.Case("08")
+					'Bereavement. Dunno where to put that?
+'					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fRegHrs, V.Local.fRegHrs)
+				
+				F.Intrinsic.Control.Case("09")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fBirHrs, V.Local.fBirHrs)
+					
+				F.Intrinsic.Control.Case("10")
+					F.Intrinsic.Math.Add(V.DataView.dtXfer!dvEmp(V.Local.iEmp).HOURS!FieldValFloat, V.Local.fSpeHrs, V.Local.fSpeHrs)
+					
+				F.Intrinsic.Control.CaseElse
+					'Do Nothing?
+					
+			F.Intrinsic.Control.EndSelect
+			
+		F.Intrinsic.Control.Next(V.Local.iEmp)
+		
+		'dont ask. dont tell
+		F.Intrinsic.Control.If(V.Local.fVolHrs, =, 0)
+			V.Local.sVolTime.Set("")
+		F.Intrinsic.Control.Else
+			V.Local.sVolTime.Set(V.Local.fVolHrs)
+		F.Intrinsic.Control.EndIf
+		
+		F.Data.DataTable.SetValue("dtEmps", V.Local.iLoop, "Reg_Hours", V.Local.fRegHrs, "Bir_Hours", V.Local.fBirHrs, "Hol_Hours", V.Local.fHolHrs, "PTO_Hours", V.Local.fPTOHrs, "Per_Hours", V.Local.fPerHrs, "Sik_Hours", V.Local.fSikHrs, "Spe_Hours", V.Local.fSpeHrs, "Vol_Hours", V.Local.sVolTime, "LaborValue1", V.Local.sLabVal, "PROCESS_FLAG", "Y")
+	F.Intrinsic.Control.Else
+		
+		'NO data found for the process
+		
+	F.Intrinsic.Control.EndIf
+	
+	F.Data.DataView.Close("dtXfer", "dvEmp")
+	
+	V.Local.fRegHrs.Set(0.00)
+	V.Local.fBirHrs.Set(0.00)
+	V.Local.fHolHrs.Set(0.00)
+	V.Local.fPTOHrs.Set(0.00)
+	V.Local.fPerHrs.Set(0.00)
+	V.Local.fSikHrs.Set(0.00)
+	V.Local.fSpeHrs.Set(0.00)
+	V.Local.fVolHrs.Set(0.00)
+	V.Local.fOTHrs.Set(0.00)
+	
+F.Intrinsic.Control.Next(V.Local.iLoop)
+
+F.Intrinsic.Control.Catch
+F.Intrinsic.Control.CallSub(Error, "Subroutine", V.Ambient.CurrentSubroutine, "ErrorDesc", V.Ambient.ErrorDescription, "ErrorNo", V.Ambient.ErrorNumber)
+F.Intrinsic.Control.EndTry
+Program.Sub.Process.End
+
+Program.Sub.Print.Start
+F.Intrinsic.Control.Try
+V.Local.sFileName.Declare(String, "")
+V.Local.sContents.Declare(String, "")
+V.Local.sExtCheck.Declare(String, "")
+V.Local.sMessage.Declare(String, "")
+V.Local.bExcel.Declare(Boolean, False)
+V.Local.bExt.Declare(Boolean, False)
+
+'We are going to export the file to an excel document. Begin by asking the user to select file and location:
+F.Intrinsic.UI.ShowSaveFileDialog("", "xlsx", "LABORTOPAYROLL.xlsx", "Labor to payroll Export", V.Local.sFileName)
+
+F.Intrinsic.Control.If(V.Local.sFileName, <>, "***CANCEL***")
+	
+	F.Intrinsic.String.IsInString(V.Local.sFileName.UCase, ".XLSX", True, V.Local.bExt)
+	
+	F.Intrinsic.Control.If(V.Local.bExt, =, False)
+		
+		F.Intrinsic.String.Build("{0}.xlsx", V.Local.sFileName, V.Local.sFileName)
+		
+	F.Intrinsic.Control.EndIf
+	
+	'To export document, we can do create a datatable and export the data into a string
+	F.Data.DataView.Create("dtEmps", "dvExp", 22, "[PROCESS_FLAG] = 'Y'", "NAME ASC")
+	
+	F.Data.DataView.ToString("dtEmps", "dvExp", "EMPLOYEE*!*NAME*!*LABORVALUE1*!*Reg_Hours*!*Bir_Hours*!*Hol_Hours*!*PTO_Hours*!*Per_Hours*!*Sik_Hours*!*Spe_Hours*!*Vol_Hours", "*!*", "$!$", V.Local.sContents)
+	
+	F.Intrinsic.String.Build("Key*!*Name*!*LaborValue1*!*E_Regular_Hours*!*E_Birthday_Hours*!*E_Holiday_Hours*!*E_Paid Time Off_Hours*!*E_Personal_Hours*!*E_Sick_Hours*!*E_Special_Hours*!*E_Volunteer_Hours$!${0}", V.Local.sContents, V.Local.sContents)
+	
+	F.Intrinsic.String.Replace(V.Local.sContents, "$!$0", "$!$'0", V.Local.sContents)
+	F.Intrinsic.String.Replace(V.Local.sContents, "*0*", "**", V.Local.sContents)
+	
+	'Now we check to make sure excel is installed in teh system. If not, we will export to CSV:
+	F.Automation.MSExcel.CheckPresence(V.Local.bExcel)
+	F.Intrinsic.Control.If(V.Local.bExcel)
+		
+		F.Automation.MSExcel.WriteSpreadsheet(V.Local.sFileName, V.Local.sContents)
+		
+	F.Intrinsic.Control.Else
+		
+		F.Intrinsic.UI.Msgbox("Instance of MS Excel was not found in system. Report will be exported to a .csv file format.", "MISSING SOFTWARE")
+		
+		F.Intrinsic.String.Replace(V.Local.sContents, "*!*", ",", V.Local.sContents)
+		F.Intrinsic.String.Replace(V.Local.sContents, "$!$", V.Ambient.NewLine, V.Local.sContents)
+		F.Intrinsic.String.Replace(V.Local.sFileName.UCase, ".XLSX", ".csv", V.Local.sFileName)
+		
+		F.Intrinsic.File.String2File(V.Local.sFileName, V.Local.sContents)
+		
+	F.Intrinsic.Control.EndIf
+	
+	F.Intrinsic.String.Build("LABOR TO PAYROLL HAS BEEN EXPORTED TO FILE{0}{0}{1}", V.Ambient.NewLine, V.Local.sFileName, V.Local.sMessage)
+	F.Intrinsic.UI.Msgbox(V.Local.sMessage, "EXPORT COMPLETED")
+	
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.End
+
+F.Intrinsic.Control.Catch
+F.Intrinsic.Control.CallSub(Error, "Subroutine", V.Ambient.CurrentSubroutine, "ErrorDesc", V.Ambient.ErrorDescription, "ErrorNo", V.Ambient.ErrorNumber)
+F.Intrinsic.Control.EndTry
+Program.Sub.Print.End
